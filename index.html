@@ -297,7 +297,7 @@ function renderReport(){
 }
 function saveSettings(){state.settings.company=document.getElementById("companyName").value.trim()||"Real Technology";state.settings.employee=document.getElementById("employeeName").value.trim();saveState();showToast("Configuración guardada.")}
 function backup(){const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`real-technology-respaldo-${todayISO()}.json`;a.click();URL.revokeObjectURL(a.href)}
-function restore(ev){const f=ev.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const x=JSON.parse(r.result);if(!Array.isArray(x.sales)||!Array.isArray(x.catalog))throw Error();state=x;saveState();init();showToast("Respaldo restaurado.")}catch(e){showToast("Archivo de respaldo inválido.")}};r.readAsText(f)}
+async function restore(ev){const f=ev.target.files[0];if(!f)return;const r=new FileReader();r.onload=async()=>{try{const x=JSON.parse(r.result);if(!Array.isArray(x.sales)||!Array.isArray(x.catalog))throw Error("Estructura inválida");if(typeof RTV2!=="undefined" && RTV2.isOnline()){const result=await RTV2.importBackupOnline(x);if(result && result.ok){await RTV2.refreshFromCloud();showToast(`Respaldo importado: ${result.products} referencias y ${result.sales} ventas.`);return;}showToast(result?.message||"No se pudo importar a la nube.");return;}state=x;saveState();init();showToast("Respaldo restaurado localmente. Conecta la base online para importarlo a todos los dispositivos.");}catch(e){console.error(e);showToast("Archivo de respaldo inválido.")}};r.readAsText(f)}
 function init(){
  document.getElementById("companyName").value=state.settings.company||"Real Technology";
  document.getElementById("employeeName").value=state.settings.employee||"";
@@ -365,6 +365,17 @@ window.RTV2 = (() => {
     if(!client||!online){if(!(await connect()))return false;}
     return pull();
   }
+  async function importBackupOnline(x){
+    if(!client||!online){if(!(await connect()))return {ok:false,message:"No se pudo conectar con Supabase."};}
+    try{
+      const products=(x.catalog||[]).map(p=>({id:String(p.id),brand:p.brand||"",name:p.name||"",category:p.category||"",type:p.type||"Nuevo",commission:Number(p.commission)||0,active:p.active!==false}));
+      if(products.length){const pr=await client.from("products").upsert(products,{onConflict:"id"});if(pr.error)throw pr.error;}
+      const sales=(x.sales||[]).map(s=>({id:String(s.id),product_id:String(s.productId),seller_name:((x.settings&&x.settings.employee)||""),sale_date:s.date,sale_time:s.time||"00:00",commission:Number(s.commission)||0,note:s.note||""}));
+      if(sales.length){const sr=await client.from("sales").upsert(sales,{onConflict:"id"});if(sr.error)throw sr.error;}
+      if(x.settings){state.settings={...state.settings,...x.settings};}
+      return {ok:true,products:products.length,sales:sales.length};
+    }catch(e){console.error("Backup import error",e);return {ok:false,message:"No se pudo importar el respaldo: "+(e.message||e)}}
+  }
   async function migrateV1(){
     const raw=localStorage.getItem("rt_sales_app_v1");if(!raw){alert("No encontré datos de V1 en este navegador.");return;}
     try{const old=JSON.parse(raw);if(Array.isArray(old.catalog))state.catalog=old.catalog;if(Array.isArray(old.sales))state.sales=old.sales;persistLocal();alert("La migración requiere una carga controlada. No se ejecutó para proteger la base online.");}catch(e){alert("No pude leer los datos de V1.");}
@@ -372,7 +383,7 @@ window.RTV2 = (() => {
   async function pdf(){
     if(!window.jspdf){window.print();return;} const {jsPDF}=window.jspdf,f=typeof currentFortnight==="function"?currentFortnight():null;const from=f?f.from:todayISO(),to=f?f.to:todayISO();const arr=(state.sales||[]).filter(s=>s.date>=from&&s.date<=to);const groups={};arr.forEach(s=>{const p=productFor(s),k=p.id;if(!groups[k])groups[k]={p,count:0,comm:0};groups[k].count++;groups[k].comm+=Number(s.commission)||0});const rows=Object.values(groups).sort((a,b)=>b.count-a.count),total=arr.reduce((a,s)=>a+(Number(s.commission)||0),0);const doc=new jsPDF({unit:"mm",format:"a4"});doc.setFontSize(18);doc.text((state.settings&&state.settings.company)||"Real Technology",14,20);doc.setFontSize(10);doc.text("Reporte de ventas y comisiones",14,28);doc.text(formatDate(from)+" - "+formatDate(to),14,34);doc.text("Vendedor: "+((state.settings&&state.settings.employee)||"—"),14,40);doc.text("Equipos vendidos: "+arr.length,14,46);doc.text("Comisión total: "+money(total),14,52);let y=62;rows.forEach(r=>{doc.text(r.p.brand+" "+r.p.name+" · "+r.count+" · "+money(r.comm),14,y);y+=7;if(y>285){doc.addPage();y=20}});doc.save("Real-Technology-Reporte-"+from+"-"+to+".pdf");
   }
-  return {connect,sync,refreshFromCloud,createSaleOnline,deleteSaleOnline,migrateV1,pdf,isOnline:()=>online};
+  return {connect,sync,refreshFromCloud,createSaleOnline,deleteSaleOnline,importBackupOnline,migrateV1,pdf,isOnline:()=>online};
 })();
 </script>
 <script src="./config.js" onerror="window.RT_CONFIG={SUPABASE_URL:'',SUPABASE_ANON_KEY:''}"></script>
