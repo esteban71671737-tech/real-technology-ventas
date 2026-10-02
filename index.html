@@ -389,6 +389,8 @@ window.RTV2 = (() => {
     }
     syncing=true;
     try{
+      // Push the local records first. Upsert is non-destructive: it does not delete
+      // sales created by another device.
       const products=(state.catalog||[]).map(p=>({
         id:String(p.id),brand:p.brand,name:p.name,category:p.category,type:p.type,
         commission:Number(p.commission)||0,active:p.active!==false
@@ -407,10 +409,6 @@ window.RTV2 = (() => {
         const r=await client.from("sales").upsert(sales,{onConflict:"id"});
         if(r.error)throw r.error;
       }
-      setStatus(true,"Sincronizado correctamente.");
-      // Refresh from cloud without starting another sync.
-      await pull();
-      setStatus(true,"Sincronizado correctamente.");
       return true;
     }catch(e){
       console.error("Supabase sync error",e);
@@ -418,6 +416,21 @@ window.RTV2 = (() => {
       return false;
     }finally{
       syncing=false;
+    }
+  }
+
+  // Always re-read the cloud after a sync. This is deliberately separate from
+  // sync() so the syncing flag cannot block the pull. It makes the cloud the
+  // shared source of truth across Chrome, other browsers and the iPhone.
+  async function refreshFromCloud(){
+    if(!client || !online) return false;
+    try{
+      const ok=await pull();
+      if(ok) setStatus(true,"Sincronizado correctamente.");
+      return ok;
+    }catch(e){
+      console.error("Supabase refresh error",e);
+      return false;
     }
   }
   async function deleteSaleOnline(id){
@@ -468,8 +481,16 @@ window.RTV2 = (() => {
 <script src="./config.js" onerror="window.RT_CONFIG={SUPABASE_URL:'',SUPABASE_ANON_KEY:''}"></script>
 <script>
 window.addEventListener("load",async()=>{
-  if(window.RT_CONFIG && RT_CONFIG.SUPABASE_URL && RT_CONFIG.SUPABASE_ANON_KEY) await RTV2.connect();
-  setInterval(()=>{if(RTV2.isOnline())RTV2.sync()},20000);
+  if(window.RT_CONFIG && RT_CONFIG.SUPABASE_URL && RT_CONFIG.SUPABASE_ANON_KEY){
+    await RTV2.connect();
+  }
+  // Keep every open device/browser fresh. A pull is non-destructive and reads
+  // the latest shared state from Supabase.
+  setInterval(()=>{if(RTV2.isOnline())RTV2.sync()},10000);
+  window.addEventListener("focus",()=>{if(RTV2.isOnline())RTV2.sync()});
+  document.addEventListener("visibilitychange",()=>{
+    if(document.visibilityState==='visible' && RTV2.isOnline()) RTV2.sync();
+  });
   if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
 });
 </script>
