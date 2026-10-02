@@ -1,0 +1,25 @@
+REAL TECHNOLOGY V2 — PUESTA EN MARCHA
+
+1. Abre Supabase y crea un proyecto.
+2. En SQL Editor ejecuta supabase_schema.sql.
+3. Copia config.example.js y renómbralo a config.js.
+4. En config.js pega la URL del proyecto y la anon/publishable key.
+5. Publica esta carpeta en un hosting HTTPS (Netlify, Vercel o GitHub Pages).
+6. Abre la URL en Safari desde el iPhone.
+7. Safari > Compartir > Añadir a pantalla de inicio.
+8. Abre Real Technology desde el icono.
+9. En Configuración pulsa "Conectar / comprobar".
+10. Si la V1 se usó en el mismo navegador, pulsa "Migrar V1 → online".
+11. Si tienes un respaldo JSON, restaura/importa ese archivo según el flujo de la V1.
+12. Configura las comisiones en Catálogo.
+
+QUÉ CONSERVA ESTA V2
+- Catálogo iPhone y Android de la V1.
+- Ventas registradas en V1.
+- Fechas, horas, comisiones y notas.
+- Dashboard, historial y reportes.
+- PDF profesional con el logo.
+- PWA para instalar en iPhone.
+
+NOTA IMPORTANTE
+No se pueden incluir credenciales privadas de una cuenta online que todavía no existe. La app está preparada para Supabase, pero necesitas crear el proyecto y pegar sus dos datos públicos en config.js.

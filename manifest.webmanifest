@@ -1,0 +1,9 @@
+{
+  "name": "Real Technology · Control de Ventas",
+  "short_name": "Real Technology",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#090a0c",
+  "theme_color": "#090a0c",
+  "description": "Control de ventas y comisiones de Real Technology."
+}
