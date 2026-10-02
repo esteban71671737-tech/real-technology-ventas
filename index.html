@@ -211,12 +211,13 @@ function clearSelected(){selectedProduct=null;document.getElementById("selectedS
 function saveSale(){
   if(!selectedProduct)return showToast("Selecciona una referencia.");
   const date=document.getElementById("saleDate").value||todayISO(), time=document.getElementById("saleTime").value||"00:00";
-  state.sales.push({id:crypto.randomUUID(),productId:selectedProduct.id,date,time,commission:Number(document.getElementById("saleCommission").value)||0,note:document.getElementById("saleNote").value.trim()});
+  const sale={id:crypto.randomUUID(),productId:selectedProduct.id,date,time,commission:Number(document.getElementById("saleCommission").value)||0,note:document.getElementById("saleNote").value.trim()};
+  state.sales.push(sale);
   saveState();
   showToast("Venta registrada correctamente.");
   clearSelected();renderDashboard();
   if(typeof RTV2!=="undefined" && RTV2.isOnline()){
-    RTV2.sync().then(ok=>{ if(!ok) showToast("Venta guardada. Se sincronizará cuando vuelva la conexión."); });
+    RTV2.saveSaleOnline(sale).then(ok=>{ if(!ok) showToast("Venta guardada localmente. Se sincronizará cuando vuelva la conexión."); else RTV2.refreshFromCloud(); });
   }
 }
 function salesBetween(from,to){
@@ -255,6 +256,7 @@ async function deleteSale(id){
     }
     state.sales=state.sales.filter(s=>s.id!==id);
     saveState();renderHistory();renderDashboard();
+    if(typeof RTV2!=="undefined" && RTV2.isOnline()) await RTV2.refreshFromCloud();
     showToast("Venta eliminada.");
   }catch(e){console.error(e);showToast("No se pudo eliminar la venta.");}
 }
@@ -382,43 +384,36 @@ window.RTV2 = (() => {
     }
   }
   async function sync(){
-    if(syncing)return true;
+    // IMPORTANT: periodic/background sync must ONLY pull from the cloud.
+    // Never push the whole local cache, because another device may have
+    // deleted records that this browser still has locally.
     if(!client || !online){
       const ok=await connect();
-      if(!ok)return false;
+      return ok;
     }
-    syncing=true;
-    try{
-      // Push the local records first. Upsert is non-destructive: it does not delete
-      // sales created by another device.
-      const products=(state.catalog||[]).map(p=>({
-        id:String(p.id),brand:p.brand,name:p.name,category:p.category,type:p.type,
-        commission:Number(p.commission)||0,active:p.active!==false
-      }));
-      const sales=(state.sales||[]).map(s=>({
-        id:String(s.id),product_id:String(s.productId),
-        seller_name:s.seller_name||((state.settings||{}).employee||""),
-        sale_date:s.date,sale_time:s.time||"00:00",
-        commission:Number(s.commission)||0,note:s.note||""
-      }));
-      if(products.length){
-        const r=await client.from("products").upsert(products,{onConflict:"id"});
-        if(r.error)throw r.error;
-      }
-      if(sales.length){
-        const r=await client.from("sales").upsert(sales,{onConflict:"id"});
-        if(r.error)throw r.error;
-      }
-      return true;
-    }catch(e){
-      console.error("Supabase sync error",e);
-      setStatus(false,"Guardado localmente; no se pudo sincronizar ahora.");
-      return false;
-    }finally{
-      syncing=false;
-    }
+    return await refreshFromCloud();
   }
 
+  async function saveSaleOnline(s){
+    if(!client || !online) return false;
+    try{
+      const r=await client.from("sales").upsert([{
+        id:String(s.id),
+        product_id:String(s.productId),
+        seller_name:s.seller_name||((state.settings||{}).employee||""),
+        sale_date:s.date,
+        sale_time:s.time||"00:00",
+        commission:Number(s.commission)||0,
+        note:s.note||""
+      }],{onConflict:"id"});
+      if(r.error) throw r.error;
+      return true;
+    }catch(e){
+      console.error("Supabase sale save error",e);
+      setStatus(false,"Guardado localmente; no se pudo sincronizar ahora.");
+      return false;
+    }
+  }
   // Always re-read the cloud after a sync. This is deliberately separate from
   // sync() so the syncing flag cannot block the pull. It makes the cloud the
   // shared source of truth across Chrome, other browsers and the iPhone.
@@ -441,6 +436,28 @@ window.RTV2 = (() => {
       return true;
     }catch(e){console.error("Supabase delete error",e);return false;}
   }
+  async function pushAllLocal(){
+    if(!client || !online){
+      const ok=await connect();
+      if(!ok) return false;
+    }
+    try{
+      const products=(state.catalog||[]).map(p=>({
+        id:String(p.id),brand:p.brand,name:p.name,category:p.category,type:p.type,
+        commission:Number(p.commission)||0,active:p.active!==false
+      }));
+      const sales=(state.sales||[]).map(s=>({
+        id:String(s.id),product_id:String(s.productId),
+        seller_name:s.seller_name||((state.settings||{}).employee||""),
+        sale_date:s.date,sale_time:s.time||"00:00",
+        commission:Number(s.commission)||0,note:s.note||""
+      }));
+      if(products.length){ const r=await client.from("products").upsert(products,{onConflict:"id"}); if(r.error) throw r.error; }
+      if(sales.length){ const r=await client.from("sales").upsert(sales,{onConflict:"id"}); if(r.error) throw r.error; }
+      await refreshFromCloud();
+      return true;
+    }catch(e){ console.error("Supabase bulk push error",e); return false; }
+  }
   async function migrateV1(){
     const raw=localStorage.getItem("rt_sales_app_v1");
     if(!raw){alert("No encontré datos de V1 en este navegador.");return;}
@@ -450,7 +467,7 @@ window.RTV2 = (() => {
       if(Array.isArray(old.sales))state.sales=old.sales.map(s=>({...s,seller_name:s.seller_name||((state.settings||{}).employee||"")}));
       persistLocal();
       if(!online && !(await connect())){alert("Los datos quedaron localmente. Conecta Supabase y vuelve a intentarlo.");return;}
-      const ok=await sync();
+      const ok=await pushAllLocal();
       alert(ok?"Migración completada: catálogo y ventas de V1 fueron enviados a la base online.":"No se pudo completar la migración.");
     }catch(e){console.error(e);alert("No pude migrar los datos de V1.");}
   }
@@ -475,7 +492,7 @@ window.RTV2 = (() => {
     doc.setFontSize(8);doc.setTextColor(110,110,115);doc.text("Real Technology · Control de Ventas",14,289);
     doc.save("Real-Technology-Reporte-"+from+"-"+to+".pdf");
   }
-  return {connect,sync,deleteSaleOnline,migrateV1,pdf,isOnline:()=>online};
+  return {connect,sync,saveSaleOnline,refreshFromCloud,deleteSaleOnline,pushAllLocal,migrateV1,pdf,isOnline:()=>online};
 })();
 </script>
 <script src="./config.js" onerror="window.RT_CONFIG={SUPABASE_URL:'',SUPABASE_ANON_KEY:''}"></script>
