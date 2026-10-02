@@ -204,14 +204,20 @@ function selectProduct(id){
   document.getElementById("selectedName").innerHTML=`<span class="pill">${escapeHtml(selectedProduct.category)}</span> <strong>${escapeHtml(selectedProduct.brand)} ${escapeHtml(selectedProduct.name)}</strong>`;
   document.getElementById("saleCommission").value=selectedProduct.commission||0;
   document.getElementById("saleNote").value="";
-  document.getElementById("selectedSale").scrollIntoView({behavior:"smooth",block:"center"});
+  document.getElementById("selectedSale").scrollIntoView({behavior:"auto",block:"nearest"});
+  setTimeout(()=>document.getElementById("saleCommission")?.focus(),0);
 }
 function clearSelected(){selectedProduct=null;document.getElementById("selectedSale").style.display="none"}
 function saveSale(){
   if(!selectedProduct)return showToast("Selecciona una referencia.");
   const date=document.getElementById("saleDate").value||todayISO(), time=document.getElementById("saleTime").value||"00:00";
   state.sales.push({id:crypto.randomUUID(),productId:selectedProduct.id,date,time,commission:Number(document.getElementById("saleCommission").value)||0,note:document.getElementById("saleNote").value.trim()});
-  saveState();showToast("Venta registrada correctamente.");clearSelected();renderDashboard();
+  saveState();
+  showToast("Venta registrada correctamente.");
+  clearSelected();renderDashboard();
+  if(typeof RTV2!=="undefined" && RTV2.isOnline()){
+    RTV2.sync().then(ok=>{ if(!ok) showToast("Venta guardada. Se sincronizará cuando vuelva la conexión."); });
+  }
 }
 function salesBetween(from,to){
   return state.sales.filter(s=>(!from||s.date>=from)&&(!to||s.date<=to));
@@ -245,7 +251,7 @@ async function deleteSale(id){
   try{
     if(typeof RTV2!=="undefined" && RTV2.isOnline()){
       const ok=await RTV2.deleteSaleOnline(id);
-      if(!ok){showToast("No se pudo eliminar en la nube. Revisa los permisos de Supabase.");return;}
+      if(!ok){showToast("No se pudo eliminar la venta de la nube.");return;}
     }
     state.sales=state.sales.filter(s=>s.id!==id);
     saveState();renderHistory();renderDashboard();
@@ -301,11 +307,10 @@ init();
 </script>
 
 <script>
-/* REAL TECHNOLOGY V2 ONLINE LAYER
-   - Keeps V1 local data intact.
-   - Uses Supabase for shared online data.
-   - Automatically syncs after local saves and every 20 seconds while online.
-   - Uses text IDs so the existing V1 catalog can be migrated without rewriting IDs.
+/* REAL TECHNOLOGY V2 ONLINE LAYER — stable sync version
+   - Saves locally first, then synchronizes in the background.
+   - Never replaces local data with an empty remote database.
+   - Prevents recursive sync/pull loops.
 */
 window.RTV2 = (() => {
   let client = null, online = false, syncing = false;
@@ -316,101 +321,124 @@ window.RTV2 = (() => {
     if(s){s.textContent=ok?"● ONLINE":"● MODO LOCAL";s.className=ok?"v2-ok":"";}
     if(t)t.textContent=msg;
   }
+  function persistLocal(){
+    localStorage.setItem("rt_sales_app_v1", JSON.stringify(state));
+  }
   async function connect(){
     const cfg = window.RT_CONFIG || {SUPABASE_URL:"",SUPABASE_ANON_KEY:""};
     if(!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY){
-      setStatus(false,"Falta configurar config.js. Usa config.example.js como plantilla.");
-      alert("Falta configurar Supabase. Abre config.js y pega SUPABASE_URL y SUPABASE_ANON_KEY.");
+      setStatus(false,"Falta configurar la conexión de Supabase.");
       return false;
     }
     try{
       client=window.supabase.createClient(cfg.SUPABASE_URL,cfg.SUPABASE_ANON_KEY);
       const {error}=await client.from("products").select("id").limit(1);
       if(error)throw error;
-      setStatus(true,"Base conectada. Las ventas pueden sincronizarse entre dispositivos.");
+      setStatus(true,"Base conectada. Las ventas se sincronizan entre dispositivos.");
       await pull();
       return true;
     }catch(e){
-      setStatus(false,"No se pudo conectar. Revisa URL, clave y el SQL de instalación.");
-      console.error(e);
+      console.error("Supabase connect error",e);
+      client=null;
+      setStatus(false,"No se pudo conectar con la base online.");
       return false;
     }
   }
   async function pull(){
-    if(!client||syncing)return;
-    syncing=true;
+    if(!client || syncing) return false;
     try{
       const [p,s]=await Promise.all([
         client.from("products").select("*").order("brand").order("name"),
         client.from("sales").select("*").order("sale_date",{ascending:false})
       ]);
-      if(p.error)throw p.error;if(s.error)throw s.error;
+      if(p.error)throw p.error;
+      if(s.error)throw s.error;
+
+      // If the cloud is empty, keep the local catalog/sales. This allows a clean first setup.
       if(p.data && p.data.length){
         state.catalog=p.data.map(x=>({
           id:x.id,brand:x.brand,name:x.name,category:x.category,type:x.type,
           commission:Number(x.commission)||0,active:x.active!==false
         }));
       }
-      state.sales=(s.data||[]).map(x=>({
-        id:x.id,productId:x.product_id,date:x.sale_date,
-        time:String(x.sale_time||"").slice(0,5),commission:Number(x.commission)||0,
-        note:x.note||"",seller_name:x.seller_name||""
-      }));
-      saveState();
+      if(s.data && s.data.length){
+        state.sales=s.data.map(x=>({
+          id:x.id,productId:x.product_id,date:x.sale_date,
+          time:String(x.sale_time||"").slice(0,5),commission:Number(x.commission)||0,
+          note:x.note||"",seller_name:x.seller_name||""
+        }));
+      }
+      persistLocal();
       if(typeof renderDashboard==="function")renderDashboard();
       if(typeof renderSaleProducts==="function")renderSaleProducts();
       if(typeof renderCatalog==="function")renderCatalog();
       if(typeof renderHistory==="function")renderHistory();
       if(typeof renderReport==="function")renderReport();
-    }catch(e){console.error(e);setStatus(false,"Conectado, pero hubo un error al leer la base.");}
-    syncing=false;
+      return true;
+    }catch(e){
+      console.error("Supabase pull error",e);
+      setStatus(false,"Conectado, pero no se pudo leer la nube.");
+      return false;
+    }
   }
   async function sync(){
-    if(!client||!online){return connect();}
+    if(syncing)return true;
+    if(!client || !online){
+      const ok=await connect();
+      if(!ok)return false;
+    }
+    syncing=true;
     try{
       const products=(state.catalog||[]).map(p=>({
         id:String(p.id),brand:p.brand,name:p.name,category:p.category,type:p.type,
         commission:Number(p.commission)||0,active:p.active!==false
       }));
       const sales=(state.sales||[]).map(s=>({
-        id:String(s.id),product_id:String(s.productId),seller_name:s.seller_name||((state.settings||{}).employee||""),
-        sale_date:s.date,sale_time:s.time||"00:00",commission:Number(s.commission)||0,note:s.note||""
+        id:String(s.id),product_id:String(s.productId),
+        seller_name:s.seller_name||((state.settings||{}).employee||""),
+        sale_date:s.date,sale_time:s.time||"00:00",
+        commission:Number(s.commission)||0,note:s.note||""
       }));
-      if(products.length){let r=await client.from("products").upsert(products);if(r.error)throw r.error;}
-      if(sales.length){let r=await client.from("sales").upsert(sales);if(r.error)throw r.error;}
+      if(products.length){
+        const r=await client.from("products").upsert(products,{onConflict:"id"});
+        if(r.error)throw r.error;
+      }
+      if(sales.length){
+        const r=await client.from("sales").upsert(sales,{onConflict:"id"});
+        if(r.error)throw r.error;
+      }
+      setStatus(true,"Sincronizado correctamente.");
+      // Refresh from cloud without starting another sync.
       await pull();
       setStatus(true,"Sincronizado correctamente.");
       return true;
-    }catch(e){console.error(e);setStatus(false,"No se pudo completar la sincronización.");return false;}
+    }catch(e){
+      console.error("Supabase sync error",e);
+      setStatus(false,"Guardado localmente; no se pudo sincronizar ahora.");
+      return false;
+    }finally{
+      syncing=false;
+    }
   }
   async function deleteSaleOnline(id){
     if(!client||!online)return true;
     try{
-      const saleId=String(id);
-      const r=await client.from("sales").delete().eq("id",saleId).select("id");
-      if(r.error) throw r.error;
-      if(!r.data || r.data.length===0){
-        console.error("Supabase no eliminó ninguna fila para id", saleId);
-        return false;
-      }
+      const r=await client.from("sales").delete().eq("id",String(id));
+      if(r.error)throw r.error;
       return true;
-    }catch(e){
-      console.error("Error eliminando venta en Supabase:",e);
-      return false;
-    }
+    }catch(e){console.error("Supabase delete error",e);return false;}
   }
   async function migrateV1(){
-    // V1 used this key. The V2 app already reads that local storage separately.
     const raw=localStorage.getItem("rt_sales_app_v1");
-    if(!raw){alert("No encontré datos de V1 en este navegador. Si tienes el respaldo JSON, primero restáuralo en la versión 1 o pásamelo para convertirlo.");return;}
+    if(!raw){alert("No encontré datos de V1 en este navegador.");return;}
     try{
       const old=JSON.parse(raw);
       if(Array.isArray(old.catalog))state.catalog=old.catalog;
       if(Array.isArray(old.sales))state.sales=old.sales.map(s=>({...s,seller_name:s.seller_name||((state.settings||{}).employee||"")}));
-      saveState();
-      if(!online && !(await connect())){alert("La V1 fue recuperada localmente. Conecta Supabase y pulsa Sincronizar para subirla.");return;}
-      await sync();
-      alert("Migración completada: catálogo y ventas de V1 fueron enviados a la base online.");
+      persistLocal();
+      if(!online && !(await connect())){alert("Los datos quedaron localmente. Conecta Supabase y vuelve a intentarlo.");return;}
+      const ok=await sync();
+      alert(ok?"Migración completada: catálogo y ventas de V1 fueron enviados a la base online.":"No se pudo completar la migración.");
     }catch(e){console.error(e);alert("No pude migrar los datos de V1.");}
   }
   async function pdf(){
@@ -440,13 +468,7 @@ window.RTV2 = (() => {
 <script src="./config.js" onerror="window.RT_CONFIG={SUPABASE_URL:'',SUPABASE_ANON_KEY:''}"></script>
 <script>
 window.addEventListener("load",async()=>{
-  // If config.js exists, connect automatically.
   if(window.RT_CONFIG && RT_CONFIG.SUPABASE_URL && RT_CONFIG.SUPABASE_ANON_KEY) await RTV2.connect();
-  // Patch saveState so existing V1 actions automatically trigger a cloud sync.
-  if(typeof saveState==="function"){
-    const originalSaveState=saveState;
-    window.saveState=function(){originalSaveState();if(RTV2.isOnline())RTV2.sync();};
-  }
   setInterval(()=>{if(RTV2.isOnline())RTV2.sync()},20000);
   if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
 });
